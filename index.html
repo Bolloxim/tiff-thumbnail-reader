@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Tiff Thumbnail Viewer</title>
+    <input id="fileInput" type="file" multiple="multiple"/>
+    <div id="logs"></div>
+    <canvas id="canvas" width="1200" height="200"></canvas>
+    <script>
+
+// global flags 
+    const profile = true;
+    const verbose = true;
+    const log = false;
+// global variables 
+    var startTimer = 0;
+    var iconx = 60;
+    var icony = 60;
+
+    function ByteSwap16(u16)
+    {
+        var t = ((u16>>8)&0xff) | ((u16&0xff)<<8);
+        if (log) console.log(u16 + " u16-> " + t);
+        return t;
+    }
+
+    function ByteSwap32(u32)
+    {
+        var t = (ByteSwap16(u32&0xffff)<<16) | ByteSwap16((u32>>16)&0xffff);
+        if (log) console.log(u32 + " u32-> " + t);
+        return t;
+    }
+
+    function EndianSwap16(tiff, value)
+    {
+      return tiff.header.swap ? ByteSwap16(value) : value;
+    }
+
+    function EndianSwap32(tiff, value)
+    {
+      return tiff.header.swap ? ByteSwap32(value) : value;
+    }
+
+    function Combine16to32(tiff, lower, higher)
+    {
+      return EndianSwap32(tiff, lower + (higher<<16));
+    }
+
+    function ReadAsInt32(data, offset)
+    {
+        return  data[offset] | data[offset+1]<<8 | data[offset+2]<<16 | data[offset+3]<<24;
+    }
+    
+    function ReadAsInt16(data, offset)
+    {
+        return data[offset] | data[offset+1]<<8;
+    }
+
+    function GetPlatform(header)
+    {
+      var offset = header[1];
+
+      if (header[0] == 0x002a4949 ) return { platform:"intel tiff", ifd:offset, swap:false };
+      if (header[0] == 0x2a004d4d ) return { platform:"motorala tiff", ifd:ByteSwap32(offset), swap:true};
+      return {platform:"invalid tiff", ifd:header[0]};
+    }
+
+    function ReadBytes(tiff, startOffset, length, _callback)
+    {        
+        if (log) console.log("reading : " + startOffset + " by " + length);
+        var blob = tiff.file.slice(startOffset, startOffset+length);
+        var reader = new FileReader();
+        reader.onloadend = function(evt) 
+        {
+          if (evt.target.readyState == FileReader.DONE) 
+          {
+            tiff.data = evt.target.result;
+           _callback(tiff);
+          }
+        };
+
+        reader.readAsArrayBuffer(blob);
+    }
+
+    function ResizeCanvasToFitIcon(ctx, w, h)
+    {
+        if (iconx+w+60 > canvas.width)
+        {
+            iconx = 60;
+            icony += h + 60;
+            if (icony+h+60 > canvas.height) 
+            { 
+              var data = ctx.getImageData(0,0,canvas.width, canvas.height);
+              canvas.height = icony+h+60;
+              ctx.putImageData(data, 0, 0);
+            }
+        }
+    }
+
+    function ProfileTime()
+    {      
+      if (profile)
+      {
+          var millis = Date.now() - startTimer;
+          document.getElementById('logs').innerHTML += "<code> total time : "+ millis + "ms </code><br />";
+      }
+    }
+
+    function GenerateJpgIcon(source, w, h)
+    {
+        var blob = new Blob([source], { type: 'image/jpeg'});
+                      
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        var image = new Image();
+
+        image.onload = function() 
+        {
+            ctx.drawImage(image, iconx, icony);
+            iconx+=w+60;
+        }
+
+        ResizeCanvasToFitIcon(ctx, w, h);
+        image.src = URL.createObjectURL(blob);
+
+        ProfileTime();
+
+    }
+
+    function GenerateIcon(source, w, h, stride)
+    {
+
+        var pixelCount = w*h;
+        var imagedata = new Uint8ClampedArray(pixelCount * 4);
+        
+        for (var i=0; i<pixelCount; i++)
+        {
+            imagedata[i*4+0] = source[i*stride+0];
+            imagedata[i*4+1] = source[i*stride+1];
+            imagedata[i*4+2] = source[i*stride+2];
+            imagedata[i*4+3] = stride==3 ? 255 : source[i*stride+3];
+        }
+                
+        var image = new ImageData(imagedata, w, h);
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        ResizeCanvasToFitIcon(ctx, w, h);
+
+        ctx.putImageData(image, iconx, icony);
+        iconx+=w+60;
+
+        ProfileTime();
+
+    }
+
+    function ProcessPhotoshopImage(tiff)
+    {
+       var payload = new Uint8Array(tiff.data);
+       var m = 0;
+
+       while(m < payload.length)
+       {
+            var rid = ByteSwap32(ReadAsInt32(payload, m)); m+=4;
+            var n = ByteSwap16(ReadAsInt16(payload, m)); m+=2;
+            var o = ByteSwap16(ReadAsInt16(payload, m))+2; m+= o&0xfffe;
+            var p = ByteSwap32(ReadAsInt32(payload, m)); m+=4;
+            p+=(p&1); //even padding
+           
+           // verify we are 8BIM
+           if (rid == 0x3842494d)
+           {
+                if (verbose) document.getElementById('logs').innerHTML += "<code> resource block found: " + n + " : " + p + " bytes </code><br />"; 
+                if (n==1036 || n==1033)
+                {
+                  // we have a thumbnail
+                  var mm = m; // copy local offset as we have to add p
+                  var sanity = ByteSwap32(ReadAsInt32(payload, mm)); mm+=4;
+                  if (sanity==1)
+                  {
+                      var nx = ByteSwap32(ReadAsInt32(payload, mm)); mm+=4;
+                      var ny = ByteSwap32(ReadAsInt32(payload, mm)); mm+=4;
+                    
+                      var scanline = ByteSwap32(ReadAsInt32(payload, mm)); mm+=4;   // nx*3 rounded up to multiple of 4
+                      var decomp = ByteSwap32(ReadAsInt32(payload, mm)); mm+=4;     // scanline*ny;
+                      var size = ByteSwap32(ReadAsInt32(payload, mm)); mm+=4;     // size = p - 28
+                      var bpp = ByteSwap32(ReadAsInt16(payload, mm)); mm+=2;     // bitsperpixel
+                      var planes = ByteSwap32(ReadAsInt16(payload, mm)); mm+=2;     // scanline*ny;
+                      var dataoffset = mm;
+                      
+                      if (verbose) document.getElementById('logs').innerHTML += "<code> jfif found : " + nx + " by " + ny + "  - " + size + " bytes </code><br />"; 
+
+                      
+                      var jfif = payload.slice(dataoffset, dataoffset+size+1);
+                      GenerateJpgIcon(jfif, nx, ny);
+
+
+                      /*
+                      var parser = new UTIF.JpegDecoder(); parser.parse(jfif);
+                      var decoded = parser.getData(parser.width, parser.height);
+
+                      GenerateIcon(decoded, parser.width, parser.height, 3);
+                      */
+                  }
+                }
+
+           }
+           // next resource
+          m+=p;
+      }
+    }
+
+    function LoadPhotoshopThumbnail(tiff)
+    {
+       // we know the thumbnail sits in a block defined by the tag so just read the entire blob
+       if (verbose) document.getElementById('logs').innerHTML += "<code> fetching photoshop thumbnail:" + tiff.tiffImage.PhotoshopLength + " bytes </code><br />";
+       ReadBytes(tiff, tiff.tiffImage.PhotoshopOffset, tiff.tiffImage.PhotoshopLength, ProcessPhotoshopImage);
+    }
+
+    function ProcessImageRaw(tiff)
+    {
+        if (verbose) document.getElementById('logs').innerHTML += "<code> creating an icon </code><br />";
+        var payload = new Uint8Array(tiff.data);
+
+        // need to convert
+
+        GenerateIcon(payload, tiff.tiffImage.ImageWidth,  tiff.tiffImage.ImageLength,  tiff.tiffImage.SamplesPerPixel);
+    }
+
+    function LoadThumbnail(tiff)
+    {
+        // load Raw
+        if (tiff.tiffImage.Compression == 1)
+        {            
+            if (verbose) document.getElementById('logs').innerHTML += "<code> uncompressed thumbnail found </code><br />";
+            ReadBytes(tiff, tiff.tiffImage.StripOffsets, tiff.tiffImage.StripByteCounts, ProcessImageRaw);
+        }
+    }
+
+    function FetchDirectories(tiff)
+    {
+      let logs = [];
+      var payload = new Uint16Array(tiff.data);
+      //console.log("directories:" + payload);
+      var numifd = tiff.numifd;
+
+      var tiffImage = [];
+
+      for (i=0; i<numifd; i++)
+      {
+        var tag = EndianSwap16(tiff, payload[i*6]);
+        var type = EndianSwap16(tiff, payload[i*6+1]);
+        var len = Combine16to32(tiff, payload[i*6+2], payload[i*6+3]);
+        var data = EndianSwap16(tiff, payload[i*6+4]);
+        var long = Combine16to32(tiff, payload[i*6+4], payload[i*6+5]);
+        var tagname = tag;
+
+        switch(tag)
+        {
+          // Baseline Tags
+          case 254:
+            tagname = "NewSubfileType";
+            tiffImage.NewSubfileType = data;
+            break;
+          case 255:
+            tagname = "SubfileType";
+            tiffImage.SubfileType = data;
+            break;
+          case 256:
+            tagname = "ImageWidth";
+            tiffImage.ImageWidth = data;        
+            break;
+          case 257:
+            tagname = "ImageLength";          
+            tiffImage.ImageLength = data;
+            break;
+          case 258:
+            tagname = "BitsPerSample";
+            tiffImage.BitsPerSample = data;
+            break;
+          case 259:
+            tagname = "Compression";
+            tiffImage.Compression = data;
+            break;
+          case 262:
+            tagname = "PhotometricInterpretation";
+            tiffImage.PhotometricInterpretation = data;
+            break;
+          case 263:
+            tagname = "Thresholding";
+            tiffImage.Thresholding = data;
+            break;
+          case 264:
+            tagname = "CellWidth";
+            tiffImage.CellWidth = data;
+            break;
+          case 265:
+            tagname = "CellHeight";
+            tiffImage.CellHeight = data;
+            break;
+          case 266:
+            tagname = "FillOrder";
+            tiffImage.FillOrder = data;
+            break;
+          case 270:
+            tagname = "ImageDescription";
+            tiffImage.ImageDescription = long;
+            data = long;
+            break;
+          case 271:
+            tagname = "Make";
+            tiffImage.Make = long;
+            data = long;
+            break;
+          case 272:
+            tagname = "Model";
+            tiffImage.Model = long;
+            data = long;
+            break;
+          case 273:
+            tagname = "StripOffsets";
+            tiffImage.StripOffsets = long;
+            data = long;
+            break;
+          case 274:
+            tagname = "Orientation";
+            tiffImage.Orientation = data;
+            break;
+          case 277:
+            tagname = "SamplesPerPixel";
+            tiffImage.SamplesPerPixel = data;
+            break;
+          case 278:
+            tagname = "RowsPerStrip";
+            tiffImage.RowsPerStrip = data;
+            break;
+          case 279:
+            tagname = "StripByteCounts";
+            tiffImage.StripByteCounts = data;
+            break;
+          case 280:
+            tagname = "MinSampleValue";
+            tiffImage.MinSampleValue = data;
+            break;
+          case 281:
+            tagname = "MaxSampleValue";
+            tiffImage.MaxSampleValue = data;
+            break;
+          case 282:
+            tagname = "XResolution";
+            tiffImage.XResolution = data;
+            break;
+          case 283:
+            tagname = "YResolution";
+            tiffImage.YResolution = data;
+            break;
+          case 284:
+            tagname = "PlanarConfiguration";
+            tiffImage.PlanarConfiguration = data;
+            break;
+          case 288:
+            tagname = "FreeOffsets";
+            tiffImage.FreeOffsets = long;
+            data = long;
+            break;
+          case 289:
+            tagname = "FreeByteCounts";
+            tiffImage.FreeByteCounts = long;
+            data = long;
+            break;
+          case 290:
+            tagname = "GrayResponseUnit";
+            tiffImage.GrayResponseUnit = data;
+            break;
+          case 291:
+            tagname = "GrayResponseCurve";
+            tiffImage.GrayResponseCurve = data;
+            break;
+          case 296:
+            tagname = "ResolutionUnit";
+            tiffImage.ResolutionUnit = data;
+            break;
+          case 305:
+            tagname = "Software";
+            tiffImage.Software = long;
+            data = long;
+            break;
+          case 306:
+            tagname = "DateTime";
+            tiffImage.DateTime = long;
+            data = long;
+            break;
+          case 315:
+            tagname = "Artist";
+            tiffImage.Artist = long;
+            data = long;
+            break;
+          case 316:
+            tagname = "HostComputer";
+            tiffImage.HostComputer = long;
+            data = long;
+            break;
+          case 320:
+            tagname = "ColorMap";
+            tiffImage.ColorMap = long;
+            data = long;
+            break;
+          case 338:
+            tagname = "ExtraSamples";
+            tiffImage.ExtraSamples = data;
+            break;
+          //Extension Tags
+          case 322:
+            tagname = "TileWidth";
+            tiffImage.TileWidth = long;
+            data = long;
+            break;
+          case 323:
+            tagname = "TileLength";
+            tiffImage.TileLength = long;
+            data = long;
+            break;
+          case 324:
+            tagname = "TileOffsets";
+            tiffImage.TileOffsets = long;
+            data = long;
+            break;
+          case 325:
+            tagname = "TileByteCounts";
+            tiffImage.TileByteCounts = long;
+            data = long;
+            break;
+
+          case 700:
+            tagname = "XMP";
+            tiffImage.XMP = long;
+            data = long;
+            break;
+          case 33432:
+            tagname = "Copyright"
+            tiffImage.Copyright = data;
+            data = long;
+            break;
+          case 33723:
+            tagname = "IPTC"
+            tiffImage.IPTC = data;
+            data = long;
+            break;
+          // Private Tags
+          case 34377:
+            tagname = "TIFFTAG_PHOTOSHOP"
+            tiffImage.PhotoshopLength = len;
+            tiffImage.PhotoshopOffset = long;
+            data = long;
+            break;
+
+          case 34665:
+            tagname = "Exif IFD";
+            tiffImage.ExifIFD = long;
+            data = long;
+    //           tiff.exif = payload[i*6+4] + (payload[i*6+5]*65536);
+    //           logs.push("<code>exif offset: " +  tiff.exif +"</code><br />");
+            // fetch exif
+    //          ReadBytes(tiff, tiff.exif, 2, FetchDirectoryCount);
+            break;
+          case 34675:
+            tagname = "ICC Profile";
+            tiffImage.ICCProfile = long;
+            data = long;
+            break;
+          case 40962:
+            tagname = "PixelXDim";
+            break;
+          case 40963:
+            tagname = "PixelYDim";
+            break;
+          case 0x9000:
+            var ascii = new Uint8Array(tiff.data);
+            var version = "";
+            version+=String.fromCharCode(ascii[i*12+8]);
+            version+=String.fromCharCode(ascii[i*12+9]);
+            version+=String.fromCharCode(ascii[i*12+10]);
+            version+=String.fromCharCode(ascii[i*12+11]);
+
+            data = version;
+            tiff.exifversion = version;
+
+          default:
+            tagname += " : not decoded";
+            break;
+        }
+
+        if (verbose)
+        {
+          switch (type)
+          {
+            case 1: typename = "byte"; break;
+            case 2: typename = "ascii"; break;
+            case 3: typename = "word"; break;
+            case 4: typename = "dword"; break;
+            case 5: typename = "rational"; break;
+            default: typename ="unknown";break;
+          }
+          logs.push("<code>Tag: " +  tagname + "[" + typename + ", " + len + "] " + data + "</code><br />");
+        }
+      }
+
+      if (verbose) document.getElementById('logs').innerHTML += logs.join("\n");
+
+      if (tiffImage.PhotoshopOffset!=0)
+      {
+          tiff.tiffImage = tiffImage;
+          LoadPhotoshopThumbnail(tiff);
+      }
+
+      if (tiffImage.NewSubfileType == 1)
+      {
+        tiff.tiffImage = tiffImage;
+        LoadThumbnail(tiff);
+      }
+
+
+      var offsets = new Uint32Array(tiff.data);
+
+      tiff.header.ifd = EndianSwap32(tiff, offsets[numifd*3]);
+      if (log) console.log(" do we have another table :" + tiff.header.ifd);
+    
+      if (tiff.header.ifd != 0)
+      {
+          ReadBytes(tiff, tiff.header.ifd, 2, FetchDirectoryCount);
+      }
+    }
+
+    function FetchDirectoryCount(tiff)
+    {
+      var payload = new Uint16Array(tiff.data);
+      var numifd = EndianSwap16(tiff, payload[0]);
+      var offset = tiff.header.ifd+2;
+
+      tiff.numifd = numifd;
+      
+      if (verbose) document.getElementById('logs').innerHTML += "<code>numifd: " +  numifd +"</code><br />";
+
+      ReadBytes(tiff, offset, numifd*12+4, FetchDirectories);
+    }
+
+    function GetHeader(tiff)
+    {
+      let logs = [];
+      var payload = new Uint32Array(tiff.data);
+      tiff.header = GetPlatform(payload);
+
+      if (verbose)
+      {
+        logs.push("<code>platform: " + tiff.header.platform + "</code><br />");
+        logs.push("<code>directory offset: " +  tiff.header.ifd + "</code><br />");
+        document.getElementById('logs').innerHTML += logs.join("\n");
+      }
+
+      if (tiff.header.platform == "invalid tiff")
+      {
+        document.getElementById('logs').innerHTML += "<code>ERROR: invalid tiff + code is " + tiff.header.ifd + "</code><br />";
+      }
+      else
+      {
+        ReadBytes(tiff, tiff.header.ifd, 2, FetchDirectoryCount);
+      }
+    }
+
+    document.getElementById('fileInput').addEventListener('change', function (event) 
+    {
+      const files = event.target.files;
+      let logs = [];
+
+      for(i=0; i<files.length; i++)
+      {        
+        if (verbose) logs.push("<code>file name: " + files[i].name + "  - file size: " +  files[i].size + "</code><br />");
+        var tiff = {file:files[i]};
+        startTimer = Date.now();
+
+        ReadBytes(tiff, 0, 8, GetHeader);
+
+      }
+
+      if (verbose) document.getElementById('logs').innerHTML = logs.join("\n");
+  
+    }, false);
+
+    </script>
+  </head>
+</html>

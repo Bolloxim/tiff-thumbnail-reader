@@ -64,6 +64,7 @@
 
       if (header[0] == 0x002a4949 ) return { platform:"intel tiff", ifd:offset, swap:false };
       if (header[0] == 0x2a004d4d ) return { platform:"motorala tiff", ifd:ByteSwap32(offset), swap:true};
+      if (header[0] == 0x53504238 ) return { platform:"adobe psd", psd:true };
       return {platform:"invalid tiff", ifd:header[0]};
     }
 
@@ -212,6 +213,22 @@
            // next resource
           m+=p;
       }
+    }
+
+    function LoadResourceSection(tiff)
+    {
+      var payload = new Uint32Array(tiff.data);
+      tiff.psdimageblocklength = ByteSwap32(payload[0]);
+      ReadBytes(tiff, tiff.psdimageblockheader+4, tiff.psdimageblocklength, ProcessPhotoshopImage); 
+    }
+
+
+    function ColorModeData(tiff)
+    {
+        var payload = new Uint32Array(tiff.data);
+        tiff.colorModeDataLen = ByteSwap32(payload[0]);
+        tiff.psdimageblockheader = tiff.colorModeDataLen + 30;
+        ReadBytes(tiff, tiff.psdimageblockheader, 4, LoadResourceSection);
     }
 
     function LoadPhotoshopThumbnail(tiff)
@@ -561,13 +578,21 @@
         document.getElementById('logs').innerHTML += logs.join("\n");
       }
 
-      if (tiff.header.platform == "invalid tiff")
+      if (tiff.header.psd == true)
       {
-        document.getElementById('logs').innerHTML += "<code>ERROR: invalid tiff + code is " + tiff.header.ifd + "</code><br />";
+          // process psd
+          ReadBytes(tiff, 26, 4, ColorModeData);
       }
       else
       {
-        ReadBytes(tiff, tiff.header.ifd, 2, FetchDirectoryCount);
+        if (tiff.header.platform == "invalid tiff")
+        {
+          document.getElementById('logs').innerHTML += "<code>ERROR: unknown fileformat code is " + payload[0] + "</code><br />";
+        }
+        else
+        {
+          ReadBytes(tiff, tiff.header.ifd, 2, FetchDirectoryCount);
+        }
       }
     }
 

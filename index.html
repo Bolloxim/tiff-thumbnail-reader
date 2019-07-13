@@ -7,11 +7,12 @@
     <input id="fileInput" type="file" multiple="multiple"/>
     <div id="logs"></div>
     <canvas id="canvas" width="1200" height="200"></canvas>
+    <div id="timings"></div>
     <script>
 
 // global flags 
     const profile = true;
-    const verbose = true;
+    const verbose = false;
     const log = false;
 // global variables 
     var startTimer = 0;
@@ -103,7 +104,7 @@
       if (profile)
       {
           var millis = Date.now() - startTimer;
-          document.getElementById('logs').innerHTML += "<code> total time : "+ millis + "ms </code><br />";
+          document.getElementById('timings').innerHTML = "<code> total time : "+ millis + "ms </code><br />";
       }
     }
 
@@ -119,6 +120,8 @@
         {
             ctx.drawImage(image, iconx, icony);
             iconx+=w+60;
+            // dispose of the blob
+            URL.revokeObjectURL(blob);
         }
 
         ResizeCanvasToFitIcon(ctx, w, h);

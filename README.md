@@ -11,3 +11,6 @@ havent tried it on much more than 3 different tiff types..  II42 MM42.  IFD1 bas
 verbose logs detailed information about the tiff
 log will add extra console information
 profile logs clock after each icon
+
+extended support to PSD files directly
+so can now load TIFF and PSD thumbnails rapidly

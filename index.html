@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title>Tiff Thumbnail Viewer</title>
+    <title>thumb Thumbnail Viewer</title>
     <input id="fileInput" type="file" multiple="multiple"/>
     <div id="logs"></div>
-    <canvas id="canvas" width="1200" height="200"></canvas>
+    <canvas id="canvas" width="1200" height="1000"></canvas>
     <div id="timings"></div>
     <script>
 
@@ -33,19 +33,19 @@
         return t;
     }
 
-    function EndianSwap16(tiff, value)
+    function EndianSwap16(thumb, value)
     {
-      return tiff.header.swap ? ByteSwap16(value) : value;
+      return thumb.header.swap ? ByteSwap16(value) : value;
     }
 
-    function EndianSwap32(tiff, value)
+    function EndianSwap32(thumb, value)
     {
-      return tiff.header.swap ? ByteSwap32(value) : value;
+      return thumb.header.swap ? ByteSwap32(value) : value;
     }
 
-    function Combine16to32(tiff, lower, higher)
+    function Combine16to32(thumb, lower, higher)
     {
-      return EndianSwap32(tiff, lower + (higher<<16));
+      return EndianSwap32(thumb, lower + (higher<<16));
     }
 
     function ReadAsInt32(data, offset)
@@ -62,23 +62,26 @@
     {
       var offset = header[1];
 
-      if (header[0] == 0x002a4949 ) return { platform:"intel tiff", ifd:offset, swap:false };
-      if (header[0] == 0x2a004d4d ) return { platform:"motorala tiff", ifd:ByteSwap32(offset), swap:true};
-      if (header[0] == 0x53504238 ) return { platform:"adobe psd", psd:true };
-      return {platform:"invalid tiff", ifd:header[0]};
+      if (header[0] == 0x002a4949 ) return { fmt:'tiff', platform:"intel tiff", tiff:true, ifd:offset, swap:false };
+      if (header[0] == 0x2a004d4d ) return { fmt:'tiff', platform:"motorala tiff", tiff:true, ifd:ByteSwap32(offset), swap:true};
+      if (header[0] == 0x53504238 ) return { fmt:'psd', platform:"adobe psd", psd:true, ifd:offset, swap: false };
+      if (header[0] == 0xE0FFD8FF ) return { fmt:'jpeg', platform:"jpeg", jpeg: true, ifd:offset&0xffff, swap: false};
+      if (header[0] == 0xE1FFD8FF ) return { fmt:'exif', platform:"exif jpeg", exif: true, ifd:offset&0xffff, swap: false};
+
+      return {platform:"invalid file format", ifd:header[0]};
     }
 
-    function ReadBytes(tiff, startOffset, length, _callback)
+    function ReadBytes(thumb, startOffset, length, _callback)
     {        
         if (log) console.log("reading : " + startOffset + " by " + length);
-        var blob = tiff.file.slice(startOffset, startOffset+length);
+        var blob = thumb.file.slice(startOffset, startOffset+length);
         var reader = new FileReader();
         reader.onloadend = function(evt) 
         {
           if (evt.target.readyState == FileReader.DONE) 
           {
-            tiff.data = evt.target.result;
-           _callback(tiff);
+            thumb.data = evt.target.result;
+           _callback(thumb);
           }
         };
 
@@ -119,13 +122,18 @@
 
         image.onload = function() 
         {
+            // update w/h with known actual
+            w = image.width;
+            h = image.height;
+            console.log("loc: " +iconx + " x " + icony);
+            ResizeCanvasToFitIcon(ctx, w, h);
             ctx.drawImage(image, iconx, icony);
             iconx+=w+60;
+
             // dispose of the blob
             URL.revokeObjectURL(blob);
         }
 
-        ResizeCanvasToFitIcon(ctx, w, h);
         image.src = URL.createObjectURL(blob);
 
         ProfileTime();
@@ -159,9 +167,9 @@
 
     }
 
-    function ProcessPhotoshopImage(tiff)
+    function ProcessPhotoshopImage(thumb)
     {
-       var payload = new Uint8Array(tiff.data);
+       var payload = new Uint8Array(thumb.data);
        var m = 0;
 
        while(m < payload.length)
@@ -215,67 +223,129 @@
       }
     }
 
-    function LoadResourceSection(tiff)
+    function LoadResourceSection(thumb)
     {
-      var payload = new Uint32Array(tiff.data);
-      tiff.psdimageblocklength = ByteSwap32(payload[0]);
-      ReadBytes(tiff, tiff.psdimageblockheader+4, tiff.psdimageblocklength, ProcessPhotoshopImage); 
+      var payload = new Uint32Array(thumb.data);
+      thumb.psdimageblocklength = ByteSwap32(payload[0]);
+      ReadBytes(thumb, thumb.base+thumb.psdimageblockheader+4, thumb.psdimageblocklength, ProcessPhotoshopImage); 
     }
 
 
-    function ColorModeData(tiff)
+    function ColorModeData(thumb)
     {
-        var payload = new Uint32Array(tiff.data);
-        tiff.colorModeDataLen = ByteSwap32(payload[0]);
-        tiff.psdimageblockheader = tiff.colorModeDataLen + 30;
-        ReadBytes(tiff, tiff.psdimageblockheader, 4, LoadResourceSection);
+        var payload = new Uint32Array(thumb.data);
+        thumb.colorModeDataLen = ByteSwap32(payload[0]);
+        thumb.psdimageblockheader = thumb.colorModeDataLen + 30;
+        ReadBytes(thumb, thumb.base+thumb.psdimageblockheader, 4, LoadResourceSection);
     }
 
-    function LoadPhotoshopThumbnail(tiff)
+    function LoadPhotoshopThumbnail(thumb)
     {
        // we know the thumbnail sits in a block defined by the tag so just read the entire blob
-       if (verbose) document.getElementById('logs').innerHTML += "<code> fetching photoshop thumbnail:" + tiff.tiffImage.PhotoshopLength + " bytes </code><br />";
-       ReadBytes(tiff, tiff.tiffImage.PhotoshopOffset, tiff.tiffImage.PhotoshopLength, ProcessPhotoshopImage);
+       if (verbose) document.getElementById('logs').innerHTML += "<code> fetching photoshop thumbnail:" + thumb.tiffImage.PhotoshopLength + " bytes </code><br />";
+       ReadBytes(thumb, thumb.base+thumb.tiffImage.PhotoshopOffset, thumb.tiffImage.PhotoshopLength, ProcessPhotoshopImage);
     }
 
-    function ProcessImageRaw(tiff)
+    function ProcessJpegImage(thumb)
     {
         if (verbose) document.getElementById('logs').innerHTML += "<code> creating an icon </code><br />";
-        var payload = new Uint8Array(tiff.data);
+        var jfif = new Uint8Array(thumb.data);
+        GenerateJpgIcon(jfif, thumb.tiffImage.ImageWidth, thumb.tiffImage.ImageLength);
+    }
+
+    function ProcessImageRaw(thumb)
+    {
+        if (verbose) document.getElementById('logs').innerHTML += "<code> creating an icon </code><br />";
+        var payload = new Uint8Array(thumb.data);
 
         // need to convert
 
-        GenerateIcon(payload, tiff.tiffImage.ImageWidth,  tiff.tiffImage.ImageLength,  tiff.tiffImage.SamplesPerPixel);
+        GenerateIcon(payload, thumb.tiffImage.ImageWidth,  thumb.tiffImage.ImageLength,  thumb.tiffImage.SamplesPerPixel);
     }
 
-    function LoadThumbnail(tiff)
+    function LoadJpegThumbnail(thumb)
+    {
+        console.log("load jpeg");
+        ReadBytes(thumb, thumb.base+thumb.tiffImage.jpegOffset, thumb.tiffImage.jpegLength, ProcessJpegImage);
+    }
+
+    function LoadThumbnail(thumb)
     {
         // load Raw
-        if (tiff.tiffImage.Compression == 1)
+        if (thumb.tiffImage.Compression == 1)
         {            
             if (verbose) document.getElementById('logs').innerHTML += "<code> uncompressed thumbnail found </code><br />";
-            ReadBytes(tiff, tiff.tiffImage.StripOffsets, tiff.tiffImage.StripByteCounts, ProcessImageRaw);
+            ReadBytes(thumb, thumb.base+thumb.tiffImage.StripOffsets, thumb.tiffImage.StripByteCounts, ProcessImageRaw);
         }
     }
 
-    function FetchDirectories(tiff)
+    function LoadJpegAPP0Section(thumb)
+    {
+         var payload = new Uint8Array(thumb.data);
+         var id = ReadAsInt32(payload, 0);
+         if (id == 0x4649464a) // JFIF
+         {
+            if(log) console.log("decoding thumb from app0 JFIF");
+            thumb.jpegVersion = payload[5] + "." + payload[6];
+            thumb.jpegDensityUnits = payload[7];
+            thumb.jpegXdensity = ReadAsInt16(payload, 8);
+            thumb.jpegYdensity = ReadAsInt16(payload, 10);
+            thumb.jpegXthumbnail = payload[12];
+            thumb.jpegYthumbnail = payload[13];
+            if (log) console.log(thumb);
+            if (thumb.jpegXthumbnail * thumb.jpegYthumbnail !=0)
+            {
+              var rawimage = payload.slice(14);
+              GenerateIcon(rawimage, thumb.jpegXthumbnail, thumb.jpegYthumbnail, 3);
+            }
+            else
+            {
+               if (verbose) document.getElementById('logs').innerHTML += "<code> thumbnail dimension set to 0 </code><br />";
+            }
+         }
+         else if (id == 0x5858464a) // JFXX
+         {
+            if(log) console.log("decoding thumb from app0 JFXX");
+            thumb.jpegThumbType = payload[5];
+            switch (thumb.jpegThumbType)
+            {
+              case 10: //JPEG
+                  var jpeg = payload.slice(6);
+                  GenerateJpgIcon(jpeg, 64, 64);
+                  break;
+              case 11:
+                  document.getElementById('logs').innerHTML += "<code> JPEG PALETIZED THUMBNAIL FOUND! not written for this case .. let me know and I'll write it</code><br />";
+                  break;
+              case 13:
+                  thumb.jpegXthumbnail = payload[6];
+                  thumb.jpegYthumbnail = payload[7];
+                  var jpeg = payload.slice(8);
+                  GenerateIcon(jpeg, thumb.jpegXthumbnail, thumb.jpegXthumbnail, 3);
+                  break;
+            }
+         }
+    }
+
+    function FetchDirectories(thumb)
     {
       let logs = [];
-      var payload = new Uint16Array(tiff.data);
+      var payload = new Uint16Array(thumb.data);
       //console.log("directories:" + payload);
-      var numifd = tiff.numifd;
+      var numifd = thumb.numifd;
 
       var tiffImage = [];
+      tiffImage.PhotoshopOffset = 0;
+      tiffImage.jpegOffset = 0;
 
       for (i=0; i<numifd; i++)
       {
-        var tag = EndianSwap16(tiff, payload[i*6]);
-        var type = EndianSwap16(tiff, payload[i*6+1]);
-        var len = Combine16to32(tiff, payload[i*6+2], payload[i*6+3]);
-        var data = EndianSwap16(tiff, payload[i*6+4]);
-        var long = Combine16to32(tiff, payload[i*6+4], payload[i*6+5]);
+        var tag = EndianSwap16(thumb, payload[i*6]);
+        var type = EndianSwap16(thumb, payload[i*6+1]);
+        var len = Combine16to32(thumb, payload[i*6+2], payload[i*6+3]);
+        var data = EndianSwap16(thumb, payload[i*6+4]);
+        var long = Combine16to32(thumb, payload[i*6+4], payload[i*6+5]);
         var tagname = tag;
-
+      
         switch(tag)
         {
           // Baseline Tags
@@ -452,6 +522,17 @@
             data = long;
             break;
 
+          case 513:
+            tagname = "TIFFTAG_JPEGIFOFFSET"
+            tiffImage.jpegOffset = long;
+            data = long;
+            break;
+          case 514:
+            tagname = "TIFFTAG_JPEGIFBYTECOUNT"
+            tiffImage.jpegLength = long;
+            data = long;
+            break;
+
           case 700:
             tagname = "XMP";
             tiffImage.XMP = long;
@@ -496,7 +577,7 @@
             tagname = "PixelYDim";
             break;
           case 0x9000:
-            var ascii = new Uint8Array(tiff.data);
+            var ascii = new Uint8Array(thumb.data);
             var version = "";
             version+=String.fromCharCode(ascii[i*12+8]);
             version+=String.fromCharCode(ascii[i*12+9]);
@@ -530,85 +611,99 @@
 
       if (tiffImage.PhotoshopOffset!=0)
       {
-          tiff.tiffImage = tiffImage;
-          LoadPhotoshopThumbnail(tiff);
+          thumb.tiffImage = tiffImage;
+          LoadPhotoshopThumbnail(thumb);
+      }
+
+      if (tiffImage.jpegOffset!=0)
+      {
+          thumb.tiffImage = tiffImage;
+          LoadJpegThumbnail(thumb);
       }
 
       if (tiffImage.NewSubfileType == 1)
       {
-        tiff.tiffImage = tiffImage;
-        LoadThumbnail(tiff);
+          thumb.tiffImage = tiffImage;
+          LoadThumbnail(thumb);
       }
 
 
-      var offsets = new Uint32Array(tiff.data);
+      var offsets = new Uint32Array(thumb.data);
 
-      tiff.header.ifd = EndianSwap32(tiff, offsets[numifd*3]);
-      if (log) console.log(" do we have another table :" + tiff.header.ifd);
+      thumb.header.ifd = EndianSwap32(thumb, offsets[numifd*3]);
+      if (log) console.log(" do we have another table :" + thumb.header.ifd);
     
-      if (tiff.header.ifd != 0)
+      if (thumb.header.ifd != 0)
       {
-          ReadBytes(tiff, tiff.header.ifd, 2, FetchDirectoryCount);
+          ReadBytes(thumb, thumb.base+thumb.header.ifd, 2, FetchDirectoryCount);
       }
     }
 
-    function FetchDirectoryCount(tiff)
+    function FetchDirectoryCount(thumb)
     {
-      var payload = new Uint16Array(tiff.data);
-      var numifd = EndianSwap16(tiff, payload[0]);
-      var offset = tiff.header.ifd+2;
+      var payload = new Uint16Array(thumb.data);
+      var numifd = EndianSwap16(thumb, payload[0]);
+      var offset = thumb.header.ifd+2;
 
-      tiff.numifd = numifd;
+      thumb.numifd = numifd;
       
       if (verbose) document.getElementById('logs').innerHTML += "<code>numifd: " +  numifd +"</code><br />";
 
-      ReadBytes(tiff, offset, numifd*12+4, FetchDirectories);
+      ReadBytes(thumb, thumb.base+offset, numifd*12+4, FetchDirectories);
     }
 
-    function GetHeader(tiff)
+    function GetHeader(thumb)
     {
       let logs = [];
-      var payload = new Uint32Array(tiff.data);
-      tiff.header = GetPlatform(payload);
+      var payload = new Uint32Array(thumb.data);
+      thumb.header = GetPlatform(payload);
 
       if (verbose)
       {
-        logs.push("<code>platform: " + tiff.header.platform + "</code><br />");
-        logs.push("<code>directory offset: " +  tiff.header.ifd + "</code><br />");
+        logs.push("<code>platform: " + thumb.header.platform + "</code><br />");
+        logs.push("<code>directory offset: " +  thumb.header.ifd + "</code><br />");
         document.getElementById('logs').innerHTML += logs.join("\n");
       }
 
-      if (tiff.header.psd == true)
+      switch(thumb.header.fmt)
       {
-          // process psd
-          ReadBytes(tiff, 26, 4, ColorModeData);
+          case 'tiff':
+            ReadBytes(thumb, thumb.base+thumb.header.ifd, 2, FetchDirectoryCount);
+            break;
+          case 'psd':
+            ReadBytes(thumb, 26, 4, ColorModeData);
+            break;
+          case 'jpeg':
+            ReadBytes(thumb, thumb.base+6, thumb.header.ifd-2, LoadJpegAPP0Section);
+            break;
+          case 'exif':
+            thumb.base = 12;  // base offset to the exif header
+            ReadBytes(thumb, thumb.base, 8, GetHeader);
+            break;
+          default:
+            document.getElementById('logs').innerHTML += "<code>ERROR: unknown fileformat code is " + payload[0] + "</code><br />";
+            break;
       }
-      else
-      {
-        if (tiff.header.platform == "invalid tiff")
-        {
-          document.getElementById('logs').innerHTML += "<code>ERROR: unknown fileformat code is " + payload[0] + "</code><br />";
-        }
-        else
-        {
-          ReadBytes(tiff, tiff.header.ifd, 2, FetchDirectoryCount);
-        }
-      }
+           
     }
 
     document.getElementById('fileInput').addEventListener('change', function (event) 
     {
       const files = event.target.files;
       let logs = [];
+      var thumbs = [];
+      startTimer = Date.now();
 
       for(i=0; i<files.length; i++)
       {        
         if (verbose) logs.push("<code>file name: " + files[i].name + "  - file size: " +  files[i].size + "</code><br />");
-        var tiff = {file:files[i]};
-        startTimer = Date.now();
+        var thumb = new Object();
+        thumbs.push(thumb);
 
-        ReadBytes(tiff, 0, 8, GetHeader);
+        thumb.file = files[i];
+        thumb.base = 0;
 
+        ReadBytes(thumb, thumb.base, 8, GetHeader);
       }
 
       if (verbose) document.getElementById('logs').innerHTML = logs.join("\n");
